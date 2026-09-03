@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Company Finder - AI Mode",
+  "version": "1.0.0",
+  "description": "Automates Google's AI Mode to find a company's official website, email, and phone from name + address, using one carefully-structured prompt per company so the answer comes back in a strict, reliably-parseable format. Pauses and waits for you to solve any CAPTCHA by hand, then continues automatically - it never solves one itself.",
+  "permissions": ["storage", "unlimitedStorage", "tabs", "scripting", "downloads", "alarms"],
+  "host_permissions": ["https://www.google.com/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'self';"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Company Finder - AI Mode"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/search*",
+        "https://google.com/search*",
+        "https://*.google.com/search*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
