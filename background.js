@@ -119,6 +119,14 @@ const ALLOWED_SOURCES = new Set(["knowledge_panel", "ai_mode", "organic"]);
 // the page, never invented.
 const ALLOWED_EMAIL_SOURCES = new Set(["knowledge_panel", "ai_mode_unverified"]);
 
+// Caps for the AI-only free-text fields. Generous enough for three
+// certifications or a long German job title, short enough that a runaway
+// answer cannot bloat every stored item (chrome.storage is shared by every
+// project, and a queue can run to thousands of rows).
+const MAX_CERTIFICATIONS_LEN = 200;
+const MAX_CONTACT_NAME_LEN = 80;
+const MAX_CONTACT_ROLE_LEN = 80;
+
 // Message types that must come from our content script running on an
 // actual Google search results tab, vs. types that only the popup should
 // ever send (it has no sender.tab).
@@ -214,6 +222,14 @@ function makeProject(name, companies, delayMinSec, delayMaxSec, concurrency, bat
       phone: null,
       email: null,
       emailSource: null,
+      // Secondary, AI-only fields. Unlike website/email these are never
+      // corroborated by a Knowledge Panel or an organic result - AI Mode is
+      // the only thing that ever produces them - so they are leads to verify,
+      // not facts. They also never affect an item's status: "found" still
+      // means "a website was found", exactly as before.
+      certifications: null,
+      contactName: null,
+      contactRole: null,
     })),
     delayMinSec: delayMinSec || 8,
     delayMaxSec: delayMaxSec || 15,
@@ -330,14 +346,23 @@ function buildPrompt(item) {
     `Identify the company ${who}. Find its OFFICIAL website (not a directory, ` +
     `marketplace, or social media profile - not LinkedIn, Facebook, Yellow Pages, ` +
     `Crunchbase, IndiaMART, Justdial, Glassdoor, Indeed, ZoomInfo, D&B, Yelp, or ` +
-    `similar), a genuine public contact email address for it, and a phone number.\n\n` +
-    `Reply with ONLY these three lines, in exactly this format, and nothing else - ` +
+    `similar), a genuine public contact email address for it, a phone number, the ` +
+    `certifications it publicly states it holds, and ONE named senior contact ` +
+    `person at that company.\n\n` +
+    `Reply with ONLY these five lines, in exactly this format, and nothing else - ` +
     `no greeting, no explanation, no markdown:\n` +
     `WEBSITE: <official website URL, or NONE if you can't find one>\n` +
     `EMAIL: <public contact email address, or NONE if you can't find one>\n` +
-    `PHONE: <phone number, or NONE if you can't find one>\n\n` +
-    `If you are not confident a value is correct, write NONE for that field instead ` +
-    `of guessing.`
+    `PHONE: <phone number, or NONE if you can't find one>\n` +
+    `CERTIFICATIONS: <up to 3 formal certifications or standards the company ` +
+    `states it holds, semicolon-separated, e.g. ISO 9001; ISO 14001; IATF 16949 - ` +
+    `not awards, memberships or partner badges - or NONE>\n` +
+    `CONTACT: <one named person publicly listed for THIS company, written as ` +
+    `Full Name (Job Title) - prefer owner, managing director or head of sales - ` +
+    `or NONE>\n\n` +
+    `Never write the "|" character inside a value. If you are not confident a ` +
+    `value is correct, write NONE for that field instead of guessing - never ` +
+    `invent a person, a job title, or a certification.`
   );
 }
 
@@ -365,18 +390,25 @@ function buildBatchPrompt(items) {
     `find its OFFICIAL website (not a directory, marketplace, or social media ` +
     `profile - not LinkedIn, Facebook, Yellow Pages, Crunchbase, IndiaMART, ` +
     `Justdial, Glassdoor, Indeed, ZoomInfo, D&B, Yelp, or similar), a genuine ` +
-    `public contact email address, and a phone number.\n\n` +
+    `public contact email address, a phone number, its published certifications, ` +
+    `and ONE named senior contact person.\n\n` +
     `Companies:\n${listLines}\n\n` +
     `Reply with exactly ${items.length} lines, one per company, in the SAME order ` +
     `and numbering as above, and nothing else - no greeting, no explanation, no ` +
-    `markdown. Use exactly this format for every line, repeating it for every ` +
-    `numbered company - do not skip any, and do not merge two companies onto one ` +
-    `line:\n` +
-    `<number>. WEBSITE: <official website URL, or NONE if you can't find one> | ` +
-    `EMAIL: <public contact email address, or NONE if you can't find one> | ` +
-    `PHONE: <phone number, or NONE if you can't find one>\n\n` +
-    `If you are not confident a value is correct, write NONE for that field instead ` +
-    `of guessing.`
+    `markdown. Use exactly this format for every line, repeating all five fields ` +
+    `for every numbered company - do not skip any field, do not omit any company, ` +
+    `and do not merge two companies onto one line:\n` +
+    `<number>. WEBSITE: <official website URL, or NONE> | ` +
+    `EMAIL: <public contact email address, or NONE> | ` +
+    `PHONE: <phone number, or NONE> | ` +
+    `CERTIFICATIONS: <up to 3 certifications the company states it holds, ` +
+    `semicolon-separated, e.g. ISO 9001; IATF 16949 - not awards or memberships - ` +
+    `or NONE> | ` +
+    `CONTACT: <one named person at this company as Full Name (Job Title), or NONE>\n\n` +
+    `Never write the "|" character inside a value - use a semicolon to separate ` +
+    `certifications. If you are not confident a value is correct, write NONE for ` +
+    `that field instead of guessing - never invent a person, a job title, or a ` +
+    `certification.`
   );
 }
 
@@ -448,6 +480,24 @@ function sanitizePhone(phone) {
   return trimmed || null;
 }
 
+// Free text straight out of a third-party-rendered page, so it gets capped
+// and stripped rather than trusted: "|" would corrupt the batch format if it
+// ever round-tripped, and control characters have no business in a CSV cell.
+// (Formula-injection in the export is handled separately by sanitizeCsvCell
+// in popup.js.) Deliberately NOT validated against a list of known
+// certifications - a whitelist would silently drop legitimate industry-
+// specific ones, and these values are presented as unverified anyway.
+function sanitizeFreeText(value, maxLen) {
+  if (typeof value !== "string") return null;
+  const cleaned = value
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\|/g, ";")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+  return cleaned || null;
+}
+
 function sanitizeEmail(email, emailSource) {
   if (typeof email !== "string" || !ALLOWED_EMAIL_SOURCES.has(emailSource)) return { email: null, emailSource: null };
   const trimmed = email.trim().slice(0, 254).toLowerCase();
@@ -464,12 +514,20 @@ function sanitizeResultEntry(entry) {
   if (!ALLOWED_STATUSES.has(entry.status)) return null;
   const phone = sanitizePhone(entry.phone);
   const { email, emailSource } = sanitizeEmail(entry.email, entry.emailSource);
+  const certifications = sanitizeFreeText(entry.certifications, MAX_CERTIFICATIONS_LEN);
+  const contactName = sanitizeFreeText(entry.contactName, MAX_CONTACT_NAME_LEN);
+  // A role with no name attached is meaningless on its own ("Managing
+  // Director" of whom?) and would read in the export as if a person had been
+  // identified when none was, so it is dropped. A name with no role is still
+  // useful and is kept.
+  const contactRole = contactName ? sanitizeFreeText(entry.contactRole, MAX_CONTACT_ROLE_LEN) : null;
+  const extras = { certifications, contactName, contactRole };
   if (entry.status !== "found") {
-    return { itemId: entry.itemId, status: entry.status, phone, email, emailSource };
+    return { itemId: entry.itemId, status: entry.status, phone, email, emailSource, ...extras };
   }
   if (typeof entry.website !== "string" || !isSafeHttpUrl(entry.website)) return null;
   if (!ALLOWED_SOURCES.has(entry.source)) return null;
-  return { itemId: entry.itemId, status: "found", website: entry.website, source: entry.source, phone, email, emailSource };
+  return { itemId: entry.itemId, status: "found", website: entry.website, source: entry.source, phone, email, emailSource, ...extras };
 }
 
 // A raw pending count gets silently truncated by Chrome's small badge area
@@ -957,6 +1015,16 @@ async function handleResult(rawMessage, tabId) {
     item.phone = entry.phone || item.phone || null;
     item.email = entry.email || item.email || null;
     item.emailSource = entry.email ? entry.emailSource : item.emailSource || null;
+    // Same never-overwrite-something-with-nothing rule as the fields above,
+    // so a re-run (RETRY_MISSING_EMAILS re-runs the whole lookup, not just the
+    // gap) can only ever add these, never blank out what an earlier pass found.
+    item.certifications = entry.certifications || item.certifications || null;
+    if (entry.contactName) {
+      // Replaced as a pair: a newly-found person's name must never be left
+      // sitting next to the previous person's job title.
+      item.contactName = entry.contactName;
+      item.contactRole = entry.contactRole || null;
+    }
     if (entry.status === "found") {
       item.website = entry.website;
       item.source = entry.source; // "knowledge_panel" | "ai_mode" | "organic"

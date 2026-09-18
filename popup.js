@@ -476,15 +476,26 @@ async function exportRows(status, filename, columns) {
 document.getElementById("exportFound").addEventListener("click", () =>
   exportRows("found", "found_websites.csv", [
     "native_id", "company_name", "city", "country", "website", "phone", "email", "emailSource", "source",
+    // AI-only, and never corroborated by a Knowledge Panel the way a website
+    // or email can be - treat every value in these three as a lead to check,
+    // not a fact. Rows saved before these columns existed export as blank
+    // (sanitizeCsvCell turns undefined into ""), so no migration is needed.
+    "certifications", "contactName", "contactRole",
   ])
 );
 
 document.getElementById("exportReview").addEventListener("click", () =>
-  exportRows("blocked", "needs_review.csv", ["native_id", "company_name", "city", "country", "phone", "email", "emailSource"])
+  exportRows("blocked", "needs_review.csv", [
+    "native_id", "company_name", "city", "country", "phone", "email", "emailSource",
+    "certifications", "contactName", "contactRole",
+  ])
 );
 
 document.getElementById("exportNotFound").addEventListener("click", () =>
-  exportRows("not_found", "not_found.csv", ["native_id", "company_name", "city", "country", "phone", "email", "emailSource"])
+  exportRows("not_found", "not_found.csv", [
+    "native_id", "company_name", "city", "country", "phone", "email", "emailSource",
+    "certifications", "contactName", "contactRole",
+  ])
 );
 
 document.getElementById("retryMissingEmailsBtn").addEventListener("click", async () => {

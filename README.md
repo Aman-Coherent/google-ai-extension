@@ -296,7 +296,7 @@ one first if you need to switch.
    dropdown and use the **Download** buttons to get:
    - `found_websites.csv` - native_id, company_name, city, country, website,
      phone, email, emailSource, source (website source: `knowledge_panel`,
-     `ai_mode`, or `organic`)
+     `ai_mode`, or `organic`), certifications, contactName, contactRole
    - `needs_review.csv` - blocked, needs a manual look (may still have
      phone/email captured before the block happened)
    - `not_found.csv` - searched successfully but no usable site found
@@ -310,6 +310,24 @@ verified address** - treat it as a hint to spot-check, not a confirmed
 contact. Your main `email_scraper.py` pipeline, which actually fetches and
 parses the company's own site, remains the authoritative source for
 verified emails.
+
+**About the `certifications`, `contactName` and `contactRole` columns:**
+these are weaker than everything else in the file, and deliberately so.
+A website or an email can be corroborated by a Knowledge Panel or an
+organic result; a certification list and a named employee cannot - AI Mode
+is the only thing that ever produces them, so there is no second source to
+agree or disagree. That makes them the most likely fields to be wrong or
+invented, and the prompt leans hard on answering NONE rather than guessing
+for exactly that reason. **Verify a name before you address anyone by it.**
+Note also that a named individual plus their job title is personal data in
+a way a company's `info@` address is not - the same B2B use is fine, but it
+is a different category of data from the rest of this file, so handle and
+retain it accordingly.
+
+If these two fields turn out to hurt more than they help for your queries,
+they cost nothing to drop: the parser treats them as optional (see
+`extractAllTriples` in `content.js`), so removing them from the prompt
+leaves every other field working exactly as before.
 
 ## Feeding results back into the main scraper
 

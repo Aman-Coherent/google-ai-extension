@@ -1,5 +1,65 @@
 # Changelog
 
+## Two new fields: company certifications, and one named contact person
+
+The AI Mode prompt now asks for five things per company instead of three,
+adding `CERTIFICATIONS` and `CONTACT`, exported as `certifications`,
+`contactName` and `contactRole`.
+
+The interesting part was not the prompt, it was making sure the extra ask
+could not cost anything already working:
+
+- **The batch regex was all-or-nothing.** `extractAllTriples` matched
+  `WEBSITE | EMAIL | PHONE` as a single unit, and a line that did not match
+  contributed nothing at all - its company was recorded `not_found`. Making
+  the two new fields required would have meant an answer with a perfect
+  website, email and phone but no certification lost **all three**, trading
+  hard-won core data for a best-effort extra. **Now:** the three original
+  fields are still required, and the two new ones are each *independently*
+  optional, so the worst case for a non-complying answer is exactly the old
+  three-field result.
+- **`PHONE` had to stop being greedy.** It captured `[^\n]+` - everything to
+  the end of the line - which would have swallowed the new fields whole. It
+  now stops at the pipe, like the two fields before it.
+- **Declaring the answer "ready" one instant too early.** The batch wait
+  ends as soon as every company has a parseable line, and with optional
+  fields a line whose extras are still streaming in looks finished. Lines
+  now carry a `pending` flag, set when the core matched but a trailing `|`
+  says more was intended, and the wait ignores those. A model that emits no
+  extras at all leaves no trailing pipe, is never pending, and so costs no
+  extra waiting - the pace of a run is unchanged.
+- **The solo path needed the opposite treatment.** There the five fields are
+  five separate lines, so stopping once `PHONE` rendered would mean the last
+  two never got captured at all; its readiness check now waits for all five,
+  and falls back on the existing "page went quiet" path when the model
+  declines to answer them.
+- **"I don't know", spelled a dozen ways.** The three original fields are
+  accidentally self-defending: a website field answered "Not publicly
+  available" fails its URL pattern and comes out empty on its own. Free text
+  has no such net - those words would land in the certifications column as
+  if they were a certification - so `NONE`, `N/A`, `unknown`, "not publicly
+  listed" and friends are now recognised explicitly.
+- **`Full Name (Job Title)`, not `Name - Role`.** Job titles routinely
+  contain a dash ("Vice President - Sales"), which would make a dash
+  separator split in the wrong place; brackets effectively never appear
+  inside a name or a title. If the model ignores the format anyway, the
+  whole string is kept as the name rather than discarded - a name without a
+  title is still a usable lead. A title with no name is dropped, since
+  "Managing Director" of nobody reads as if a person had been found.
+
+**Verified** by running the real parsing functions out of `content.js`
+against 29 cases: fully compliant five-field answers, the old three-field
+format (unchanged output), certifications-only and contact-only lines,
+mid-stream text, the prompt's own echoed template, `NONE` in every field,
+evasive phrasings, markdown bold, the singular `CERTIFICATION` label, and
+the five-separate-lines solo format. All pass.
+
+**Worth watching:** the batch query is now about 25% longer (roughly 2,150
+characters at batch size 10 with long German company names, up from ~1,700).
+If answer quality or format compliance drops on large batches, batch size is
+the dial - the two new fields being optional means a partial answer degrades
+instead of failing.
+
 ## Multiple tabs now actually run concurrently (Concurrent tabs setting)
 
 The engine already had per-worker state, alarms, watchdogs and race-safe

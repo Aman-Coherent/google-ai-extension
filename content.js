@@ -409,6 +409,52 @@
     return match ? match[0].trim() : null;
   }
 
+  // CERTIFICATIONS and CONTACT are free text, so unlike the three fields
+  // above there is no token pattern to extract - whatever the model wrote IS
+  // the value. That removes the accidental safety net the others get: a
+  // website/email/phone field answered "Not publicly available" fails its
+  // token match and comes out null on its own, but the same words would sail
+  // straight into a certifications cell as if they were a certification. The
+  // prompt asks for NONE, and mostly gets it, but a generative answer phrases
+  // "I don't know" a dozen ways, so the common ones are recognised here too.
+  const NO_VALUE_RE =
+    /^(none|n\/?a|null|unknown|not\s+(found|known|available|listed|specified|public|publicly\s+(available|listed|known))|no\s+(information|data)(\s+\w+)*)$/i;
+
+  function isMissingText(raw) {
+    if (!raw) return true;
+    const cleaned = raw.replace(INVISIBLE_CHARS_RE, "").replace(/\s+/g, " ").trim().replace(/[.!]+$/, "");
+    return !cleaned || NO_VALUE_RE.test(cleaned);
+  }
+
+  function tidyText(raw) {
+    return raw.replace(INVISIBLE_CHARS_RE, "").replace(/\s+/g, " ").trim().replace(/[,;.]+$/, "");
+  }
+
+  function toCertifications(raw) {
+    if (isMissingText(raw)) return null;
+    return tidyText(raw) || null;
+  }
+
+  // The prompt asks for "Full Name (Job Title)" specifically because
+  // parentheses split reliably: a job title routinely contains a dash
+  // ("Vice President - Sales"), which is why a dash separator was not used,
+  // but neither a name nor a title normally contains brackets. If the model
+  // ignores the format anyway, the whole string is kept as the name rather
+  // than being thrown away - a name with no title is still a usable lead.
+  const CONTACT_RE = /^(.+?)\s*[([]\s*([^)\]]+?)\s*[)\]]$/;
+
+  function toContact(raw) {
+    if (isMissingText(raw)) return { contactName: null, contactRole: null };
+    const cleaned = tidyText(raw);
+    const match = cleaned.match(CONTACT_RE);
+    if (match) {
+      const name = tidyText(match[1]);
+      const role = tidyText(match[2]);
+      if (name) return { contactName: name, contactRole: role || null };
+    }
+    return { contactName: cleaned || null, contactRole: null };
+  }
+
   // Single-company answer: three separate labeled lines (no leading
   // number - see buildPrompt in background.js). Filters out the prompt's
   // own echoed placeholder line first (see isPlaceholderTemplateValue), so
@@ -425,10 +471,15 @@
   }
 
   function extractAiAnswer(text) {
+    // "CERTIFICATIONS?" is a regex, not a literal - extractLabeled() builds a
+    // RegExp from this string, so the trailing "?" tolerates the model
+    // answering with the singular label.
     return {
       website: toWebsite(extractLabeled(text, "WEBSITE")),
       email: toEmail(extractLabeled(text, "EMAIL")),
       phone: toPhone(extractLabeled(text, "PHONE")),
+      certifications: toCertifications(extractLabeled(text, "CERTIFICATIONS?")),
+      ...toContact(extractLabeled(text, "CONTACT")),
     };
   }
 
@@ -460,16 +511,48 @@
   // isPlaceholderTemplateValue. What's left, whatever the echo did or
   // didn't render, is real per-company answers only. See runBatch, which
   // relies on this to line matches back up with companies by position.
+  //
+  // WEBSITE/EMAIL/PHONE are REQUIRED; CERTIFICATIONS and CONTACT are each
+  // INDEPENDENTLY OPTIONAL, and that asymmetry is the whole point. The
+  // regex is all-or-nothing by nature: a line that does not match
+  // contributes nothing, and its company is recorded not_found. Making the
+  // two newer fields required would therefore mean that a model which
+  // answered the website, email and phone perfectly but omitted a
+  // certification lost ALL THREE - trading hard-won core data for a
+  // best-effort extra. Optional groups mean the worst case for a
+  // non-complying answer is simply the old three-field result.
+  //
+  // `pending` marks a line whose core matched but which is immediately
+  // followed by a "|" with no parsed tail behind it: that pipe says more
+  // fields were intended and are still streaming in. runBatch uses it to
+  // avoid declaring the answer ready one instant before the extras land,
+  // while a model that emits no tail at all leaves no trailing pipe, is
+  // never marked pending, and so costs no extra waiting.
   function extractAllTriples(text) {
-    const re =
-      /WEBSITE\s*\*{0,2}\s*:\s*\*{0,2}\s*([^|\n]+)\|\s*\*{0,2}\s*EMAIL\s*\*{0,2}\s*:\s*\*{0,2}\s*([^|\n]+)\|\s*\*{0,2}\s*PHONE\s*\*{0,2}\s*:\s*\*{0,2}\s*([^\n]+)/gi;
+    const lbl = (name) => `${name}\\s*\\*{0,2}\\s*:\\s*\\*{0,2}\\s*`;
+    const re = new RegExp(
+      `${lbl("WEBSITE")}([^|\\n]+)\\|\\s*\\*{0,2}\\s*${lbl("EMAIL")}([^|\\n]+)\\|\\s*\\*{0,2}\\s*${lbl("PHONE")}([^|\\n]+)` +
+        `(?:\\|\\s*\\*{0,2}\\s*${lbl("CERTIFICATIONS?")}([^|\\n]+))?` +
+        `(?:\\|\\s*\\*{0,2}\\s*${lbl("CONTACT")}([^\\n]+))?`,
+      "gi"
+    );
     return [...text.matchAll(re)]
       .filter((m) => !isPlaceholderTemplateValue(m[1]) && !isPlaceholderTemplateValue(m[2]) && !isPlaceholderTemplateValue(m[3]))
-      .map((m) => ({
-        website: toWebsite(cleanValue(m[1])),
-        email: toEmail(cleanValue(m[2])),
-        phone: toPhone(cleanValue(m[3])),
-      }));
+      .map((m) => {
+        // A tail field is dropped on its own if it is still showing the
+        // prompt's placeholder, rather than discarding the whole line the way
+        // a placeholder in one of the three core fields does.
+        const certRaw = m[4] && !isPlaceholderTemplateValue(m[4]) ? m[4] : null;
+        const contactRaw = m[5] && !isPlaceholderTemplateValue(m[5]) ? m[5] : null;
+        return {
+          website: toWebsite(cleanValue(m[1])),
+          email: toEmail(cleanValue(m[2])),
+          phone: toPhone(cleanValue(m[3])),
+          certifications: certRaw ? toCertifications(cleanValue(certRaw)) : null,
+          ...toContact(contactRaw ? cleanValue(contactRaw) : null),
+          pending: !m[5] && text[m.index + m[0].length] === "|",
+        };
+      });
   }
 
   // --- Pairing answer lines to companies by name, not just by position ---
@@ -771,9 +854,21 @@
       // it returning non-null for a label means a REAL answer - not just
       // the echo - has rendered for it.
       const started = Date.now();
+      // All five labels, not just the core three: on this path the answer is
+      // five SEPARATE lines, so stopping as soon as PHONE has rendered would
+      // return before CERTIFICATIONS and CONTACT had even begun streaming and
+      // they would never be captured at all. (The batch path is different -
+      // there all five fields share one line, so its trailing-pipe check is
+      // enough. See extractAllTriples.) When the model declines to answer the
+      // last two, the existing "page went quiet" path in waitForAnswer ends
+      // the wait instead, which is exactly what it is there for.
       const readyForSingle = (text) =>
-        ["WEBSITE", "EMAIL", "PHONE"].every((label) => extractLabeled(text, label) !== null) ||
-        !!getPanelSnapshot();
+        ["WEBSITE", "EMAIL", "PHONE", "CERTIFICATIONS?", "CONTACT"].every(
+          (label) => extractLabeled(text, label) !== null
+        ) || !!getPanelSnapshot();
+      // Still the core three only: "has anything real arrived yet" governs
+      // how patient waitForAnswer is with a half-rendered answer, and the two
+      // optional fields are not evidence that an answer is under way.
       const anyForSingle = (text) =>
         ["WEBSITE", "EMAIL", "PHONE"].some((label) => extractLabeled(text, label) !== null);
       let outcome = await waitForAnswer(readyForSingle, anyForSingle, ANSWER_WAIT_MS);
@@ -809,6 +904,9 @@
       const phone = panel.phone || ai.phone || null;
       const email = panel.email || ai.email || null;
       const emailSource = panel.email ? "knowledge_panel" : ai.email ? "ai_mode_unverified" : null;
+      // No Knowledge Panel equivalent exists for either of these - AI Mode is
+      // the only source, so they are always unverified leads.
+      const { certifications, contactName, contactRole } = ai;
 
       if (!website && !email && !phone) {
         // AI Mode came up completely empty - either it errored ("something
@@ -822,7 +920,10 @@
         return; // this script instance is about to be torn down by the navigation
       }
 
-      sendResult({ status: website ? "found" : "not_found", website, source, phone, email, emailSource });
+      sendResult({
+        status: website ? "found" : "not_found",
+        website, source, phone, email, emailSource, certifications, contactName, contactRole,
+      });
       return;
     }
 
@@ -850,7 +951,11 @@
   async function runBatch(items, batchToken) {
     const waitMs = Math.min(BATCH_ANSWER_BASE_MS + BATCH_ANSWER_PER_ITEM_MS * items.length, BATCH_ANSWER_MAX_MS);
     const started = Date.now();
-    const readyForBatch = (text) => extractAllTriples(text).length >= items.length;
+    // A line still trailing an unanswered "|" does not count as ready yet -
+    // see `pending` in extractAllTriples. This keeps the pace unchanged for a
+    // model that omits the optional fields entirely, while not cutting off a
+    // model that is part-way through writing them.
+    const readyForBatch = (text) => extractAllTriples(text).filter((t) => !t.pending).length >= items.length;
     const anyForBatch = (text) => extractAllTriples(text).length > 0;
     let outcome = await waitForAnswer(readyForBatch, anyForBatch, waitMs);
 
@@ -942,6 +1047,9 @@
           phone: parsed.phone,
           email: parsed.email,
           emailSource: parsed.email ? "ai_mode_unverified" : null,
+          certifications: parsed.certifications,
+          contactName: parsed.contactName,
+          contactRole: parsed.contactRole,
         };
       }
       // No usable line for this company. Solo retries are deliberately NOT
